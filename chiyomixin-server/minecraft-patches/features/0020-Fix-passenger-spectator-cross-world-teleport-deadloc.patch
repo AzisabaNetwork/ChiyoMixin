@@ -1,0 +1,117 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: albardoo02 <akshs@outlook.jp>
+Date: Tue, 20 Oct 2026 17:09:56 +0900
+Subject: [PATCH] Fix passenger/spectator cross-world teleport deadlock,
+ shutdown async task hang, and thread pool scaling
+
+
+diff --git a/net/minecraft/world/entity/Entity.java b/net/minecraft/world/entity/Entity.java
+index 459ccc4165abd66f5476cc74829cf2eda4901358..ca8449ac237077f888b700baa5dc17462b497014 100644
+--- a/net/minecraft/world/entity/Entity.java
++++ b/net/minecraft/world/entity/Entity.java
+@@ -4081,7 +4081,7 @@ public abstract class Entity implements SyncedDataHolder, DebugValueSource, Name
+     }
+ 
+     private @Nullable Entity teleportCrossDimension(ServerLevel oldLevel, ServerLevel newLevel, TeleportTransition teleportTransition) {
+-        java.util.function.Supplier<Entity> teleportTask = () -> { // ChiyoMixin - thread safe teleport
++        // ChiyoMixin start - decouple oldLevel operations from target world task to prevent passenger/spectator cross-thread deadlocks
+         List<Entity> passengers = this.getPassengers();
+         List<Entity> list = new ArrayList<>(passengers.size());
+         this.ejectPassengers();
+@@ -4093,36 +4093,39 @@ public abstract class Entity implements SyncedDataHolder, DebugValueSource, Name
+             }
+         }
+ 
+-        ProfilerFiller profilerFiller = Profiler.get();
+-        profilerFiller.push("teleportCrossDimension");
+-        Entity entityx = this.getType().create(newLevel, EntitySpawnReason.DIMENSION_TRAVEL);
+-        if (entityx == null) {
+-            profilerFiller.pop();
+-            return null;
+-        } else {
+-            // Paper start - Fix item duplication and teleport issues
+-            if (this instanceof Leashable leashable) {
+-                leashable.dropLeash(); // Paper drop lead
+-            }
+-            // Paper end - Fix item duplication and teleport issues
+-            entityx.restoreFrom(this);
+-            this.removeAfterChangingDimensions();
+-            entityx.teleportSetPosition(PositionMoveRotation.of(this), PositionMoveRotation.of(teleportTransition), teleportTransition.relatives());
+-            if (this.inWorld) newLevel.addDuringTeleport(entityx); // CraftBukkit - Don't spawn the new entity if the current entity isn't spawned
+-
+-            for (Entity entity2 : list) {
+-                entity2.startRiding(entityx, true, false);
+-            }
+-
+-            newLevel.resetEmptyTime();
+-            teleportTransition.postTeleportTransition().onTransition(entityx);
+-            this.teleportSpectators(teleportTransition, oldLevel);
+-            profilerFiller.pop();
+-            return entityx;
++        // Paper start - Fix item duplication and teleport issues
++        if (this instanceof Leashable leashable) {
++            leashable.dropLeash(); // Paper drop lead
+         }
+-        // ChiyoMixin start - thread safe teleport
++        // Paper end - Fix item duplication and teleport issues
++        this.removeAfterChangingDimensions();
++        this.teleportSpectators(teleportTransition, oldLevel);
++
++        java.util.function.Supplier<Entity> spawnInNewWorldTask = () -> {
++            ProfilerFiller profilerFiller = Profiler.get();
++            profilerFiller.push("teleportCrossDimension");
++            try {
++                Entity entityx = this.getType().create(newLevel, EntitySpawnReason.DIMENSION_TRAVEL);
++                if (entityx == null) {
++                    return null;
++                }
++
++                entityx.restoreFrom(this);
++                entityx.teleportSetPosition(PositionMoveRotation.of(this), PositionMoveRotation.of(teleportTransition), teleportTransition.relatives());
++                if (this.inWorld) newLevel.addDuringTeleport(entityx); // CraftBukkit - Don't spawn the new entity if the current entity isn't spawned
++
++                for (Entity entity2 : list) {
++                    entity2.startRiding(entityx, true, false);
++                }
++
++                newLevel.resetEmptyTime();
++                teleportTransition.postTeleportTransition().onTransition(entityx);
++                return entityx;
++            } finally {
++                profilerFiller.pop();
++            }
+         };
+-        return this.level().worldThread.runWorldTaskThreadSafely(newLevel.worldThread, new world.chiyomixin.thread.WorldTask<>(teleportTask), "NMS Entity teleport");
++        return this.level().worldThread.runWorldTaskThreadSafely(newLevel.worldThread, new world.chiyomixin.thread.WorldTask<>(spawnInNewWorldTask), "NMS Entity teleport");
+         // ChiyoMixin end
+     }
+ 
+diff --git a/world/chiyomixin/thread/ImplConcurrentTaskHandler.java b/world/chiyomixin/thread/ImplConcurrentTaskHandler.java
+index 5c268c45eb2b07af27b606c56eb971316c221cca..e3c2ce28246023ef6d667dfe357dc88b0ccc35c9 100644
+--- a/world/chiyomixin/thread/ImplConcurrentTaskHandler.java
++++ b/world/chiyomixin/thread/ImplConcurrentTaskHandler.java
+@@ -36,6 +36,11 @@ public class ImplConcurrentTaskHandler extends ConcurrentTaskHandler {
+         
+         // Async thread - always dispatch to world thread to ensure TickThread context (prevents Moonrise chunk/block-entity errors)
+         if (currentWorldThread == null) {
++            // If server is stopping or stopped, world threads are no longer ticking. Execute directly to allow shutdown data saving without hanging.
++            if (org.bukkit.Bukkit.isStopping() || net.minecraft.server.MinecraftServer.getServer() == null || net.minecraft.server.MinecraftServer.getServer().isStopped() || !net.minecraft.server.MinecraftServer.getServer().isRunning()) {
++                return supplier.get();
++            }
++
+             WorldTask<T> worldTask = new WorldTask<>(supplier);
+             targetWorldThread.addWorldTask(worldTask);
+             
+diff --git a/world/chiyomixin/thread/WorldThreadPool.java b/world/chiyomixin/thread/WorldThreadPool.java
+index 129bddf348bb322f2a8e993a7ffdb56fbd103f84..2b38eb0b739ac1980409102cb5f5bc389dac0912 100644
+--- a/world/chiyomixin/thread/WorldThreadPool.java
++++ b/world/chiyomixin/thread/WorldThreadPool.java
+@@ -40,7 +40,7 @@ public class WorldThreadPool {
+     public static void init() {
+         int poolSize = ChiyoMixinConfig.getMaxWorldThreads();
+         if (poolSize <= 0) {
+-            poolSize = 4;
++            poolSize = Math.max(Runtime.getRuntime().availableProcessors(), 8);
+         }
+ 
+         AtomicInteger threadCount = new AtomicInteger(0);

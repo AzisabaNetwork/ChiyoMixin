@@ -1,0 +1,60 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: albardoo02 <akshs@outlook.jp>
+Date: Tue, 20 Oct 2026 15:18:18 +0900
+Subject: [PATCH] Normalize SafeguardLogger rate limit keys and prevent memory
+ growth
+
+
+diff --git a/world/chiyomixin/log/SafeguardLogger.java b/world/chiyomixin/log/SafeguardLogger.java
+index 3991986bea7fb14b5042a16e4689e382e88ba2d5..97be0623eb51d1996a706418dff91ad21a0b6b02 100644
+--- a/world/chiyomixin/log/SafeguardLogger.java
++++ b/world/chiyomixin/log/SafeguardLogger.java
+@@ -8,16 +8,34 @@ import org.bukkit.Bukkit;
+ public final class SafeguardLogger {
+     private static final ConcurrentHashMap<String, RateLimitEntry> rateLimitMap = new ConcurrentHashMap<>();
+     private static final long RATE_LIMIT_WINDOW_MS = 5000L;
++    private static final int MAX_ENTRIES = 256;
+ 
+     private static class RateLimitEntry {
+         long lastLoggedTime = 0;
+         final AtomicInteger suppressedCount = new AtomicInteger(0);
+     }
+ 
++    private static String getCategory(String context) {
++        if (context == null) return "unknown";
++        int idx = context.indexOf(" at ");
++        if (idx != -1) return context.substring(0, idx);
++        idx = context.indexOf(" (");
++        if (idx != -1) return context.substring(0, idx);
++        idx = context.indexOf('[');
++        if (idx != -1) return context.substring(0, idx);
++        return context;
++    }
++
+     public static void logSafeguardException(String context, Throwable t) {
+         if (t == null) return;
+-        String key = context + ":" + t.getClass().getName() + ":" + (t.getMessage() != null ? t.getMessage() : "");
++        String category = getCategory(context);
++        String key = category + ":" + t.getClass().getName();
+         long now = System.currentTimeMillis();
++
++        if (rateLimitMap.size() > MAX_ENTRIES) {
++            rateLimitMap.entrySet().removeIf(e -> (now - e.getValue().lastLoggedTime) > RATE_LIMIT_WINDOW_MS * 2);
++        }
++
+         RateLimitEntry entry = rateLimitMap.computeIfAbsent(key, k -> new RateLimitEntry());
+ 
+         synchronized (entry) {
+diff --git a/world/chiyomixin/thread/WorldThread.java b/world/chiyomixin/thread/WorldThread.java
+index 3e64aca99b37bbbe9bf041c3b072a00fa4a9e2f7..626bb12a183ec18133f0d52bbcbe9bde84fd0188 100644
+--- a/world/chiyomixin/thread/WorldThread.java
++++ b/world/chiyomixin/thread/WorldThread.java
+@@ -68,7 +68,7 @@ public class WorldThread implements Runnable {
+         try {
+             worldTickRunnable.run();
+         } catch (Throwable t) {
+-            world.chiyomixin.log.SafeguardLogger.logSafeguardException("WorldTickThread[" + tick + "]", t);
++            world.chiyomixin.log.SafeguardLogger.logSafeguardException("WorldTickThread[" + (level.getWorld() != null ? level.getWorld().getName() : "world") + "]", t);
+         }
+         
+         executeWorldTasks();

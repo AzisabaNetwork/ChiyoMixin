@@ -1,0 +1,21 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: albardoo02 <akshs@outlook.jp>
+Date: Tue, 20 Oct 2026 17:19:41 +0900
+Subject: [PATCH] perf(event): fast-path exit when no listeners registered for
+ event
+
+
+diff --git a/src/main/java/io/papermc/paper/plugin/manager/PaperEventManager.java b/src/main/java/io/papermc/paper/plugin/manager/PaperEventManager.java
+index 6771ab6910ee141a339402b660b5fa50d251114b..44e5500a92079029d43bd7c5d1ad6d538073e743 100644
+--- a/src/main/java/io/papermc/paper/plugin/manager/PaperEventManager.java
++++ b/src/main/java/io/papermc/paper/plugin/manager/PaperEventManager.java
+@@ -58,6 +58,9 @@ public class PaperEventManager {
+ 
+         HandlerList handlers = event.getHandlers();
+         RegisteredListener[] listeners = handlers.getRegisteredListeners();
++        if (listeners.length == 0) {
++            return;
++        }
+ 
+         boolean holdingLock = false;
+         try {

@@ -1,0 +1,176 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: albardoo02 <akshs@outlook.jp>
+Date: Tue, 20 Oct 2026 17:19:45 +0900
+Subject: [PATCH] perf(core): dynamic haveTime propagation, zero-alloc bypass
+ caches, fast-path tasks, and player disconnect cleanup
+
+
+diff --git a/net/minecraft/server/MinecraftServer.java b/net/minecraft/server/MinecraftServer.java
+index 80dd85ecb671a77154fe47f50898638f8fba293e..80806757a49e418208c58b803c13084b0e474542 100644
+--- a/net/minecraft/server/MinecraftServer.java
++++ b/net/minecraft/server/MinecraftServer.java
+@@ -1806,12 +1806,13 @@ public abstract class MinecraftServer extends ReentrantBlockableEventLoop<TickTa
+         for (ServerLevel serverLevel : this.getAllLevels()) {
+             // ChiyoMixin start - world threading
+             world.chiyomixin.thread.WorldThread worldThread = serverLevel.worldThread;
++            worldThread.setHaveTime(hasTimeLeft); // ChiyoMixin - update dynamic haveTime for this tick
+             if (worldThread.getWorldTickRunnable() == null) {
+             worldThread.setWorldTickRunnable(() -> {
+             serverLevel.thread = Thread.currentThread();
+             // ChiyoMixin end
+             // ChiyoMixin start - add ChiyogamiLib
+-            world.chiyogami.chiyogamilib.scheduler.WorldThreadRunnable.worldThreadHeartBeat(serverLevel.getWorld(), currentTick);
++            world.chiyogami.chiyogamilib.scheduler.WorldThreadRunnable.worldThreadHeartBeat(serverLevel.getWorld(), MinecraftServer.currentTick);
+             long worldServerStartTimeNano = System.nanoTime();
+             // ChiyoMixin end
+             serverLevel.hasPhysicsEvent = org.bukkit.event.block.BlockPhysicsEvent.getHandlerList().getRegisteredListeners().length > 0; // Paper - BlockPhysicsEvent
+@@ -1830,7 +1831,7 @@ public abstract class MinecraftServer extends ReentrantBlockableEventLoop<TickTa
+             profilerFiller.push("tick");
+ 
+             try {
+-                serverLevel.tick(hasTimeLeft);
++                serverLevel.tick(worldThread.getHaveTime());
+             } catch (Throwable var7) {
+                 CrashReport crashReport = CrashReport.forThrowable(var7, "Exception ticking world");
+                 serverLevel.fillReportDetails(crashReport);
+diff --git a/net/minecraft/server/players/PlayerList.java b/net/minecraft/server/players/PlayerList.java
+index 989ac565c47a70c7947cb7315d0f5c2cfecd0363..063805197506041d61721422a958904640f95ff3 100644
+--- a/net/minecraft/server/players/PlayerList.java
++++ b/net/minecraft/server/players/PlayerList.java
+@@ -497,6 +497,7 @@ public abstract class PlayerList {
+         player.retireScheduler(); // Paper - Folia schedulers
+         player.getAdvancements().stopListening();
+         this.players.remove(player);
++        world.chiyomixin.bridge.ParallelBridge.removeParallelEntityMoveHandler(player.getBukkitEntity()); // ChiyoMixin - clean up move handler on disconnect
+         this.playersByName.remove(player.getScoreboardName().toLowerCase(java.util.Locale.ROOT)); // Spigot
+         this.server.getCustomBossEvents().onPlayerDisconnect(player);
+         UUID uuid = player.getUUID();
+diff --git a/world/chiyomixin/config/EventLockBypass.java b/world/chiyomixin/config/EventLockBypass.java
+index 65a7e749d189a370e8557846c8a622a24d1d41ac..67546430facec4dd8c924745bf5a949bc86ec29b 100644
+--- a/world/chiyomixin/config/EventLockBypass.java
++++ b/world/chiyomixin/config/EventLockBypass.java
+@@ -25,30 +25,40 @@ public final class EventLockBypass {
+         if (eventClass == null || bypassedEventClasses.isEmpty()) {
+             return false;
+         }
+-        return eventClassCache.computeIfAbsent(eventClass, clazz -> {
+-            Class<?> current = clazz;
+-            while (current != null && current != Object.class) {
+-                if (bypassedEventClasses.contains(current.getName())) {
+-                    return true;
+-                }
+-                current = current.getSuperclass();
++        Boolean cached = eventClassCache.get(eventClass);
++        if (cached != null) {
++            return cached;
++        }
++        boolean bypassed = false;
++        Class<?> current = eventClass;
++        while (current != null && current != Object.class) {
++            if (bypassedEventClasses.contains(current.getName())) {
++                bypassed = true;
++                break;
+             }
+-            return false;
+-        });
++            current = current.getSuperclass();
++        }
++        eventClassCache.put(eventClass, bypassed);
++        return bypassed;
+     }
+ 
+     public static boolean isPluginBypassed(String pluginName) {
+         if (pluginName == null || bypassedPluginPrefixes.isEmpty()) {
+             return false;
+         }
+-        return pluginNameCache.computeIfAbsent(pluginName, name -> {
+-            for (String prefix : bypassedPluginPrefixes) {
+-                int prefixLen = prefix.length();
+-                if (prefixLen <= name.length() && name.regionMatches(true, 0, prefix, 0, prefixLen)) {
+-                    return true;
+-                }
++        Boolean cached = pluginNameCache.get(pluginName);
++        if (cached != null) {
++            return cached;
++        }
++        boolean bypassed = false;
++        for (String prefix : bypassedPluginPrefixes) {
++            int prefixLen = prefix.length();
++            if (prefixLen <= pluginName.length() && pluginName.regionMatches(true, 0, prefix, 0, prefixLen)) {
++                bypassed = true;
++                break;
+             }
+-            return false;
+-        });
++        }
++        pluginNameCache.put(pluginName, bypassed);
++        return bypassed;
+     }
+ }
+diff --git a/world/chiyomixin/log/SafeguardLogger.java b/world/chiyomixin/log/SafeguardLogger.java
+index 97be0623eb51d1996a706418dff91ad21a0b6b02..cc78e1e6097f4279d8503f0a34a247768a4aa80f 100644
+--- a/world/chiyomixin/log/SafeguardLogger.java
++++ b/world/chiyomixin/log/SafeguardLogger.java
+@@ -36,7 +36,10 @@ public final class SafeguardLogger {
+             rateLimitMap.entrySet().removeIf(e -> (now - e.getValue().lastLoggedTime) > RATE_LIMIT_WINDOW_MS * 2);
+         }
+ 
+-        RateLimitEntry entry = rateLimitMap.computeIfAbsent(key, k -> new RateLimitEntry());
++        RateLimitEntry entry = rateLimitMap.get(key);
++        if (entry == null) {
++            entry = rateLimitMap.computeIfAbsent(key, k -> new RateLimitEntry());
++        }
+ 
+         synchronized (entry) {
+             if (now - entry.lastLoggedTime >= RATE_LIMIT_WINDOW_MS) {
+diff --git a/world/chiyomixin/thread/WorldThread.java b/world/chiyomixin/thread/WorldThread.java
+index 643097a4c7140d1493fec08e928c2aae08a9ab7b..5aac5b194e4e837cdc5c82d48254c2b9733aa56d 100644
+--- a/world/chiyomixin/thread/WorldThread.java
++++ b/world/chiyomixin/thread/WorldThread.java
+@@ -40,6 +40,16 @@ public class WorldThread implements Runnable {
+     public Runnable getWorldTickRunnable() {return worldTickRunnable;}
+     
+     public void setWorldTickRunnable(Runnable worldTickRunnable) {this.worldTickRunnable = worldTickRunnable;}
++
++    private volatile java.util.function.BooleanSupplier currentHaveTime = () -> true;
++
++    public void setHaveTime(java.util.function.BooleanSupplier haveTime) {
++        this.currentHaveTime = haveTime != null ? haveTime : () -> true;
++    }
++
++    public java.util.function.BooleanSupplier getHaveTime() {
++        return currentHaveTime;
++    }
+     
+     public boolean isProcessingWorldTick() {return isProcessingWorldTick;}
+     
+@@ -175,6 +185,7 @@ public class WorldThread implements Runnable {
+     }
+ 
+     public void executeWorldTasks() {
++        if (worldTasks.isEmpty()) return;
+         WorldTask<?> task;
+         while ((task = worldTasks.poll()) != null) {
+             try {
+diff --git a/world/chiyomixin/thread/WorldThreadPool.java b/world/chiyomixin/thread/WorldThreadPool.java
+index 2b38eb0b739ac1980409102cb5f5bc389dac0912..2a86d6fc267c842ccddae47d42cb063ca1982219 100644
+--- a/world/chiyomixin/thread/WorldThreadPool.java
++++ b/world/chiyomixin/thread/WorldThreadPool.java
+@@ -60,13 +60,13 @@ public class WorldThreadPool {
+     }
+     
+     public static boolean isWorldThread() {
+-        return CURRENT_WORLD_THREAD.get() != null || worldThreadHashMap.containsKey(Thread.currentThread());
++        return CURRENT_WORLD_THREAD.get() != null;
+     }
+     
+     public static WorldThread getWorldThreadFromCurrentThread() {
+-        WorldThread wt = CURRENT_WORLD_THREAD.get();
+-        if (wt != null) return wt;
+-        return worldThreadHashMap.get(Thread.currentThread());
++        return CURRENT_WORLD_THREAD.get();
++
++
+     }
+     
+     public static void shutdown() {

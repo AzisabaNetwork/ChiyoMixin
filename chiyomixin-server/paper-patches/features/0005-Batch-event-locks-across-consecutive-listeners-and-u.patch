@@ -1,0 +1,102 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: albardoo02 <akshs@outlook.jp>
+Date: Tue, 20 Oct 2026 15:16:20 +0900
+Subject: [PATCH] Batch event locks across consecutive listeners and use
+ non-fair lock
+
+
+diff --git a/src/main/java/io/papermc/paper/plugin/manager/PaperEventManager.java b/src/main/java/io/papermc/paper/plugin/manager/PaperEventManager.java
+index cc8f941fdca30142219cf5f34741750a00fe4834..b7c0a76a58fadfd8449fb788cc364153276bae8c 100644
+--- a/src/main/java/io/papermc/paper/plugin/manager/PaperEventManager.java
++++ b/src/main/java/io/papermc/paper/plugin/manager/PaperEventManager.java
+@@ -28,7 +28,7 @@ import java.util.logging.Level;
+ 
+ public class PaperEventManager {
+     public static boolean synchronizedEvent; // ChiyoMixin - config
+-    private final java.util.concurrent.locks.ReentrantLock EVENT_LOCK = new world.chiyomixin.thread.WorldThreadSafeLock(true); // ChiyoMixin - synced event
++    private final java.util.concurrent.locks.ReentrantLock EVENT_LOCK = new world.chiyomixin.thread.WorldThreadSafeLock(false); // ChiyoMixin - synced event
+ 
+     private final Server server;
+ 
+@@ -59,41 +59,49 @@ public class PaperEventManager {
+         HandlerList handlers = event.getHandlers();
+         RegisteredListener[] listeners = handlers.getRegisteredListeners();
+ 
+-        for (RegisteredListener registration : listeners) {
+-            Plugin plugin = registration.getPlugin();
+-            if (!plugin.isEnabled()) {
+-                continue;
+-            }
+-
+-            boolean lockThis = syncListeners && !world.chiyomixin.config.EventLockBypass.isPluginBypassed(plugin.getName());
+-            if (lockThis) {
+-                EVENT_LOCK.lock();
+-            }
+-            try {
+-                registration.callEvent(event);
+-            } catch (AuthorNagException ex) {
+-                if (plugin.isNaggable()) {
+-                    plugin.setNaggable(false);
+-
+-                    this.server.getLogger().log(Level.SEVERE, String.format(
+-                        "Nag author(s): '%s' of '%s' about the following: %s",
+-                        plugin.getPluginMeta().getAuthors(),
+-                        plugin.getPluginMeta().getDisplayName(),
+-                        ex.getMessage()
+-                    ));
+-                }
+-            } catch (Throwable ex) {
+-                world.chiyomixin.log.SafeguardLogger.logSafeguardException("Event " + event.getEventName() + " (" + plugin.getName() + ")", ex);
+-                String msg = "Could not pass event " + event.getEventName() + " to " + plugin.getPluginMeta().getDisplayName();
+-                if (!(event instanceof ServerExceptionEvent)) { // We don't want to cause an endless event loop
+-                    try {
+-                        this.callEvent(new ServerExceptionEvent(new ServerEventException(msg, ex, plugin, registration.getListener(), event)));
+-                    } catch (Throwable ignored) {}
++        boolean holdingLock = false;
++        try {
++            for (RegisteredListener registration : listeners) {
++                Plugin plugin = registration.getPlugin();
++                if (!plugin.isEnabled()) {
++                    continue;
+                 }
+-            } finally {
+-                if (lockThis) {
++
++                boolean lockThis = syncListeners && !world.chiyomixin.config.EventLockBypass.isPluginBypassed(plugin.getName());
++                if (lockThis && !holdingLock) {
++                    EVENT_LOCK.lock();
++                    holdingLock = true;
++                } else if (!lockThis && holdingLock) {
+                     EVENT_LOCK.unlock();
++                    holdingLock = false;
+                 }
++
++                try {
++                    registration.callEvent(event);
++                } catch (AuthorNagException ex) {
++                    if (plugin.isNaggable()) {
++                        plugin.setNaggable(false);
++
++                        this.server.getLogger().log(Level.SEVERE, String.format(
++                            "Nag author(s): '%s' of '%s' about the following: %s",
++                            plugin.getPluginMeta().getAuthors(),
++                            plugin.getPluginMeta().getDisplayName(),
++                            ex.getMessage()
++                        ));
++                    }
++                } catch (Throwable ex) {
++                    world.chiyomixin.log.SafeguardLogger.logSafeguardException("Event " + event.getEventName() + " (" + plugin.getName() + ")", ex);
++                    String msg = "Could not pass event " + event.getEventName() + " to " + plugin.getPluginMeta().getDisplayName();
++                    if (!(event instanceof ServerExceptionEvent)) { // We don't want to cause an endless event loop
++                        try {
++                            this.callEvent(new ServerExceptionEvent(new ServerEventException(msg, ex, plugin, registration.getListener(), event)));
++                        } catch (Throwable ignored) {}
++                    }
++                }
++            }
++        } finally {
++            if (holdingLock) {
++                EVENT_LOCK.unlock();
+             }
+         }
+     }

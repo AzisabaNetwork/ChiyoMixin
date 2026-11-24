@@ -1,0 +1,103 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: albardoo02 <akshs@outlook.jp>
+Date: Tue, 20 Oct 2026 15:43:38 +0900
+Subject: [PATCH] Optimize WorldThread safeLockCount to primitive int avoiding
+ atomic CAS
+
+
+diff --git a/world/chiyomixin/thread/ImplWorldThreadLockHandler.java b/world/chiyomixin/thread/ImplWorldThreadLockHandler.java
+index eb04a897b8d393da90c9b33ae3854323e2bf4fad..d233650a51a12545fff228424efa228698dfa997 100644
+--- a/world/chiyomixin/thread/ImplWorldThreadLockHandler.java
++++ b/world/chiyomixin/thread/ImplWorldThreadLockHandler.java
+@@ -1,52 +1,27 @@
+ package world.chiyomixin.thread;
+ 
+-import org.bukkit.Bukkit;
+-import world.chiyogami.chiyogamilib.ChiyogamiLib;
+-
+ public class ImplWorldThreadLockHandler extends WorldThreadLockHandler {
+     
+     public ImplWorldThreadLockHandler() {super();}
+     
+     @Override
+     public void lock(WorldThreadSafeLock worldThreadSafeLock) {
+-        //Main thread
+-        if (ChiyogamiLib.isMainThread()) {
+-            return;
+-        }
+-        
+         WorldThread worldThread = WorldThreadPool.getWorldThreadFromCurrentThread();
+-        
+-        //Async thread
+-        if (worldThread == null) {
+-            return;
++        if (worldThread != null) {
++            worldThread.safeLockCount++;
+         }
+-        
+-        //World thread
+-        worldThread.safeLockCount.addAndGet(1);
+     }
+     
+     @Override
+     public void unlock(WorldThreadSafeLock worldThreadSafeLock) {
+-        //Main thread
+-        if (ChiyogamiLib.isMainThread()) {
+-            return;
+-        }
+-        
+         WorldThread worldThread = WorldThreadPool.getWorldThreadFromCurrentThread();
+-        
+-        //Async thread
+-        if (worldThread == null) {
+-            return;
+-        }
+-        
+-        //World thread
+-        int lockNest = worldThread.safeLockCount.addAndGet(-1);
+-        
+-        if (lockNest < 0) {
+-            int old = worldThread.safeLockCount.getAndSet(0);
+-            throw new IllegalStateException("Lock and unlock counts do not match. \n" +
+-                "Excessive unlocking or an internal error may have occurred.\n" +
+-                "LockCount : " + old);
++        if (worldThread != null) {
++            int lockNest = --worldThread.safeLockCount;
++            if (lockNest < 0) {
++                worldThread.safeLockCount = 0;
++                throw new IllegalStateException("Lock and unlock counts do not match. \n" +
++                    "Excessive unlocking or an internal error may have occurred.");
++            }
+         }
+     }
+     
+diff --git a/world/chiyomixin/thread/WorldThread.java b/world/chiyomixin/thread/WorldThread.java
+index c37e74705d865bb3b3e6640b82e1deeef33d26b1..ae4215ac7991a5e4a2044e72fcd9298c73082c03 100644
+--- a/world/chiyomixin/thread/WorldThread.java
++++ b/world/chiyomixin/thread/WorldThread.java
+@@ -6,7 +6,6 @@ import world.chiyomixin.log.ChiyoMixinLogger;
+ 
+ import java.util.*;
+ import java.util.concurrent.ExecutionException;
+-import java.util.concurrent.atomic.AtomicInteger;
+ import java.util.concurrent.locks.ReentrantLock;
+ 
+ public class WorldThread implements Runnable {
+@@ -30,7 +29,7 @@ public class WorldThread implements Runnable {
+     
+     private Thread currentThread = Thread.currentThread();
+     
+-    public AtomicInteger safeLockCount = new AtomicInteger();
++    public int safeLockCount = 0;
+     
+     public WorldThread(Level level) {
+         this.level = level;
+@@ -118,7 +117,7 @@ public class WorldThread implements Runnable {
+ 
+                 if (waitForThread == null) {
+                     if (targetWorldThread.isProcessingWorldTick) {
+-                        if (this.safeLockCount.get() != 0) {
++                        if (this.safeLockCount != 0) {
+                             throw new IllegalStateException("""
+                                 The current thread has already acquired a lock with WorldThreadSafeLock.
+                                 In this state, it cannot safely wait for another world's task completion.

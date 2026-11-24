@@ -1,0 +1,78 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: albardoo02 <akshs@outlook.jp>
+Date: Tue, 20 Oct 2026 13:46:10 +0900
+Subject: [PATCH] Event lock bypass and safeguard logger support in
+ PaperEventManager
+
+
+diff --git a/src/main/java/io/papermc/paper/plugin/manager/PaperEventManager.java b/src/main/java/io/papermc/paper/plugin/manager/PaperEventManager.java
+index d32501ab4663e229d80bb1b4223c02c691afe8ac..cc8f941fdca30142219cf5f34741750a00fe4834 100644
+--- a/src/main/java/io/papermc/paper/plugin/manager/PaperEventManager.java
++++ b/src/main/java/io/papermc/paper/plugin/manager/PaperEventManager.java
+@@ -40,18 +40,16 @@ public class PaperEventManager {
+     // SimplePluginManager
+     public void callEvent(@NotNull Event event) {
+         boolean shouldSync = synchronizedEvent && !event.isAsynchronous();
+-        if (shouldSync) {
+-            EVENT_LOCK.lock();
+-            try {
+-                callEventInternal(event);
+-            } finally {
+-                EVENT_LOCK.unlock();
+-            }
++        if (shouldSync && !world.chiyomixin.config.EventLockBypass.isEventBypassed(event.getClass())) {
++            callEventInternal(event, true);
+         } else {
+-            callEventInternal(event);
++            callEventInternal(event, false);
+         }
+     }
+     void callEventInternal(@NotNull Event event) {
++        callEventInternal(event, false);
++    }
++    void callEventInternal(@NotNull Event event, boolean syncListeners) {
+         if (event.isAsynchronous() && this.server.isPrimaryThread()) {
+             throw new IllegalStateException(event.getEventName() + " may only be triggered asynchronously.");
+         } else if (!event.isAsynchronous() && !this.server.isPrimaryThread() && !this.server.isStopping()) {
+@@ -62,15 +60,18 @@ public class PaperEventManager {
+         RegisteredListener[] listeners = handlers.getRegisteredListeners();
+ 
+         for (RegisteredListener registration : listeners) {
+-            if (!registration.getPlugin().isEnabled()) {
++            Plugin plugin = registration.getPlugin();
++            if (!plugin.isEnabled()) {
+                 continue;
+             }
+ 
++            boolean lockThis = syncListeners && !world.chiyomixin.config.EventLockBypass.isPluginBypassed(plugin.getName());
++            if (lockThis) {
++                EVENT_LOCK.lock();
++            }
+             try {
+                 registration.callEvent(event);
+             } catch (AuthorNagException ex) {
+-                Plugin plugin = registration.getPlugin();
+-
+                 if (plugin.isNaggable()) {
+                     plugin.setNaggable(false);
+ 
+@@ -82,10 +83,16 @@ public class PaperEventManager {
+                     ));
+                 }
+             } catch (Throwable ex) {
+-                String msg = "Could not pass event " + event.getEventName() + " to " + registration.getPlugin().getPluginMeta().getDisplayName();
+-                this.server.getLogger().log(Level.SEVERE, msg, ex);
++                world.chiyomixin.log.SafeguardLogger.logSafeguardException("Event " + event.getEventName() + " (" + plugin.getName() + ")", ex);
++                String msg = "Could not pass event " + event.getEventName() + " to " + plugin.getPluginMeta().getDisplayName();
+                 if (!(event instanceof ServerExceptionEvent)) { // We don't want to cause an endless event loop
+-                    this.callEvent(new ServerExceptionEvent(new ServerEventException(msg, ex, registration.getPlugin(), registration.getListener(), event)));
++                    try {
++                        this.callEvent(new ServerExceptionEvent(new ServerEventException(msg, ex, plugin, registration.getListener(), event)));
++                    } catch (Throwable ignored) {}
++                }
++            } finally {
++                if (lockThis) {
++                    EVENT_LOCK.unlock();
+                 }
+             }
+         }

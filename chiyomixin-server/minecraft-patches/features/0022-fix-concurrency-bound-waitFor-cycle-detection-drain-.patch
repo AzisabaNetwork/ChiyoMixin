@@ -1,0 +1,93 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: albardoo02 <akshs@outlook.jp>
+Date: Tue, 20 Oct 2026 17:28:17 +0900
+Subject: [PATCH] fix(concurrency): bound waitFor cycle detection, drain tasks
+ on shutdown, resolve thread provider, and ensure memory visibility
+
+
+diff --git a/net/minecraft/world/entity/Entity.java b/net/minecraft/world/entity/Entity.java
+index ca8449ac237077f888b700baa5dc17462b497014..e7a5b782e8d7908608a5ebd143691daccd2331aa 100644
+--- a/net/minecraft/world/entity/Entity.java
++++ b/net/minecraft/world/entity/Entity.java
+@@ -4125,7 +4125,7 @@ public abstract class Entity implements SyncedDataHolder, DebugValueSource, Name
+                 profilerFiller.pop();
+             }
+         };
+-        return this.level().worldThread.runWorldTaskThreadSafely(newLevel.worldThread, new world.chiyomixin.thread.WorldTask<>(spawnInNewWorldTask), "NMS Entity teleport");
++        return oldLevel.worldThread.runWorldTaskThreadSafely(newLevel.worldThread, new world.chiyomixin.thread.WorldTask<>(spawnInNewWorldTask), "NMS Entity teleport");
+         // ChiyoMixin end
+     }
+ 
+diff --git a/world/chiyomixin/bridge/ParallelEntityMoveHandler.java b/world/chiyomixin/bridge/ParallelEntityMoveHandler.java
+index 4588a2280fe5ae47727fcc8e2cf3ade0b5122328..44be0b431f3780f7de4014430439908e86e2cfe0 100644
+--- a/world/chiyomixin/bridge/ParallelEntityMoveHandler.java
++++ b/world/chiyomixin/bridge/ParallelEntityMoveHandler.java
+@@ -13,8 +13,8 @@ public class ParallelEntityMoveHandler {
+     
+     private final Player player;
+     
+-    public Function<Map.Entry<BoundingBox, Vector>, Boolean> tryToMoveFunction = null;
+-    public BiPredicate<BoundingBox, Vector> tryToMovePredicate = null;
++    public volatile Function<Map.Entry<BoundingBox, Vector>, Boolean> tryToMoveFunction = null;
++    public volatile BiPredicate<BoundingBox, Vector> tryToMovePredicate = null;
+     
+     public ParallelEntityMoveHandler(Player player){this.player = player;}
+     
+diff --git a/world/chiyomixin/thread/ChiyoMixinServerThreadProvider.java b/world/chiyomixin/thread/ChiyoMixinServerThreadProvider.java
+index 4492eebbcca81fbf7d3bad5d258439aaaa2507c3..efc457dde3ee7420e0fd4d36d9cd33cda706ec16 100644
+--- a/world/chiyomixin/thread/ChiyoMixinServerThreadProvider.java
++++ b/world/chiyomixin/thread/ChiyoMixinServerThreadProvider.java
+@@ -22,7 +22,8 @@ public class ChiyoMixinServerThreadProvider {
+                     if (world == null) return null;
+                     var craftWorld = (CraftWorld) world;
+                     var handle = craftWorld.getHandle();
+-                    return handle != null ? handle.thread : null;
++                    if (handle == null) return null;
++                    return handle.thread != null ? handle.thread : (handle.worldThread != null ? handle.worldThread.getCurrentThread() : null);
+                 }
+             });
+         } catch (Exception e) {
+diff --git a/world/chiyomixin/thread/WorldThread.java b/world/chiyomixin/thread/WorldThread.java
+index 5aac5b194e4e837cdc5c82d48254c2b9733aa56d..fc60e400a0ff2b797b1072e92b8fbd8805138fbb 100644
+--- a/world/chiyomixin/thread/WorldThread.java
++++ b/world/chiyomixin/thread/WorldThread.java
+@@ -133,9 +133,10 @@ public class WorldThread implements Runnable {
+ 
+                 //Checks to see if threads waiting to exit are not recursively waiting for themselves.
+                 WorldThread waitForThread = targetWorldThread;
+-                do {
++                int maxHops = 32;
++                while (waitForThread != null && waitForThread != this && --maxHops > 0) {
+                     waitForThread = waitForThread.waitFor;
+-                } while (waitForThread != null && waitForThread != this);
++                }
+ 
+                 if (waitForThread == null) {
+                     if (targetWorldThread.isProcessingWorldTick) {
+diff --git a/world/chiyomixin/thread/WorldThreadPool.java b/world/chiyomixin/thread/WorldThreadPool.java
+index 2a86d6fc267c842ccddae47d42cb063ca1982219..202e1e81c34b52b364a297240aa98230f60164c7 100644
+--- a/world/chiyomixin/thread/WorldThreadPool.java
++++ b/world/chiyomixin/thread/WorldThreadPool.java
+@@ -1,6 +1,7 @@
+ package world.chiyomixin.thread;
+ 
+ import ca.spottedleaf.moonrise.common.util.TickThread;
++import net.minecraft.server.MinecraftServer;
+ import net.minecraft.server.level.ServerLevel;
+ import world.chiyomixin.config.ChiyoMixinConfig;
+ 
+@@ -70,6 +71,14 @@ public class WorldThreadPool {
+     }
+     
+     public static void shutdown() {
++        MinecraftServer server = MinecraftServer.getServer();
++        if (server != null) {
++            for (ServerLevel level : server.getAllLevels()) {
++                if (level.worldThread != null) {
++                    level.worldThread.executeWorldTasks();
++                }
++            }
++        }
+         if (executorService != null) {
+             executorService.shutdown();
+             try {

@@ -1,0 +1,15 @@
+{
+  "required": true,
+  "package": "com.example.mixin",
+  "minVersion": "0.8.7",
+  "compatibilityLevel": "JAVA_21",
+  "mixinextras": {
+    "minVersion": "0.5.5"
+  },
+  "mixins": [
+    "MixinCraftPlayer",
+    "MixinEnchantmentHelper",
+    "MixinEnchantmentMenu",
+    "MixinServerPlayer"
+  ]
+}

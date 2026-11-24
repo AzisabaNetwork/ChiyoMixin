@@ -1,0 +1,134 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: albardoo02 <akshs@outlook.jp>
+Date: Tue, 20 Oct 2026 16:55:03 +0900
+Subject: [PATCH] Enhance concurrency safety: volatile fields,
+ unlock-before-execute, UUID bridge, graceful shutdown
+
+
+diff --git a/world/chiyomixin/bridge/ParallelBridge.java b/world/chiyomixin/bridge/ParallelBridge.java
+index 4905abac212a7110a4faedab1eb7b36cb1162140..34cafc06d368aeba384bb9002b6b09c5329c1eeb 100644
+--- a/world/chiyomixin/bridge/ParallelBridge.java
++++ b/world/chiyomixin/bridge/ParallelBridge.java
+@@ -9,13 +9,17 @@ public class ParallelBridge {
+     
+     public static boolean parallelWorldBridge = false;
+     
+-    private static final Map<Player, ParallelEntityMoveHandler> parallelEntityMoveHandlerMap = new ConcurrentHashMap<>();
++    private static final Map<java.util.UUID, ParallelEntityMoveHandler> parallelEntityMoveHandlerMap = new ConcurrentHashMap<>();
+     
+     public static ParallelEntityMoveHandler getParallelEntityMoveHandler(Player player){
+-        if(!parallelWorldBridge) return null;
+-        return parallelEntityMoveHandlerMap.computeIfAbsent(player, ParallelEntityMoveHandler::new);
++        if(!parallelWorldBridge || player == null) return null;
++        return parallelEntityMoveHandlerMap.computeIfAbsent(player.getUniqueId(), uuid -> new ParallelEntityMoveHandler(player));
+     }
+     
+-    public static void removeParallelEntityMoveHandler(Player player){parallelEntityMoveHandlerMap.remove(player);}
++    public static void removeParallelEntityMoveHandler(Player player){
++        if (player != null) {
++            parallelEntityMoveHandlerMap.remove(player.getUniqueId());
++        }
++    }
+     
+ }
+diff --git a/world/chiyomixin/thread/ChiyoMixinServerThreadProvider.java b/world/chiyomixin/thread/ChiyoMixinServerThreadProvider.java
+index 9a9e1c0483dfa6e743ee6a94639c8182a21edddb..4492eebbcca81fbf7d3bad5d258439aaaa2507c3 100644
+--- a/world/chiyomixin/thread/ChiyoMixinServerThreadProvider.java
++++ b/world/chiyomixin/thread/ChiyoMixinServerThreadProvider.java
+@@ -19,7 +19,10 @@ public class ChiyoMixinServerThreadProvider {
+ 
+                 @Override
+                 public Thread getWorldThread(World world) {
+-                    return ((CraftWorld) world).getHandle().thread;
++                    if (world == null) return null;
++                    var craftWorld = (CraftWorld) world;
++                    var handle = craftWorld.getHandle();
++                    return handle != null ? handle.thread : null;
+                 }
+             });
+         } catch (Exception e) {
+diff --git a/world/chiyomixin/thread/WorldThread.java b/world/chiyomixin/thread/WorldThread.java
+index 802407d9a62e9a76c65a887ffb4e78e649617afb..ea73c59b04c59cb34fb48fa8d7825aee787380f1 100644
+--- a/world/chiyomixin/thread/WorldThread.java
++++ b/world/chiyomixin/thread/WorldThread.java
+@@ -21,13 +21,13 @@ public class WorldThread implements Runnable {
+     
+     private long tick = 0;
+     
+-    private WorldThread waitFor = null;
++    private volatile WorldThread waitFor = null;
+     
+-    private boolean isProcessingWorldTick = false;
++    private volatile boolean isProcessingWorldTick = false;
+     
+     public final ReentrantLock LOCK = new ReentrantLock(false);
+     
+-    private Thread currentThread = Thread.currentThread();
++    private volatile Thread currentThread = Thread.currentThread();
+     
+     public int safeLockCount = 0;
+     
+@@ -113,6 +113,7 @@ public class WorldThread implements Runnable {
+         }
+ 
+         if (level != targetWorldThread.level) {
++            boolean directExecute = false;
+             try {
+                 TASK_SCHEDULING_LOCK.lock();
+                 targetWorldThread.LOCK.lock();
+@@ -138,15 +139,19 @@ public class WorldThread implements Runnable {
+                         targetWorldThread.addWorldTask(worldTask);
+                         this.waitFor = targetWorldThread;
+                     } else {
+-                        worldTask.complete();
++                        directExecute = true;
+                     }
+                 } else {
+-                    worldTask.complete();
++                    directExecute = true;
+                 }
+             } finally {
+                 targetWorldThread.LOCK.unlock();
+                 TASK_SCHEDULING_LOCK.unlock();
+             }
++
++            if (directExecute) {
++                worldTask.complete();
++            }
+         } else {
+             worldTask.complete();
+         }
+diff --git a/world/chiyomixin/thread/WorldThreadPool.java b/world/chiyomixin/thread/WorldThreadPool.java
+index f92d01626996ec083866ac7dc961714a1d68a65c..129bddf348bb322f2a8e993a7ffdb56fbd103f84 100644
+--- a/world/chiyomixin/thread/WorldThreadPool.java
++++ b/world/chiyomixin/thread/WorldThreadPool.java
+@@ -39,7 +39,7 @@ public class WorldThreadPool {
+ 
+     public static void init() {
+         int poolSize = ChiyoMixinConfig.getMaxWorldThreads();
+-        if (poolSize == 0) {
++        if (poolSize <= 0) {
+             poolSize = 4;
+         }
+ 
+@@ -69,7 +69,19 @@ public class WorldThreadPool {
+         return worldThreadHashMap.get(Thread.currentThread());
+     }
+     
+-    public static void shutdown(){if(executorService != null) executorService.shutdown();}
++    public static void shutdown() {
++        if (executorService != null) {
++            executorService.shutdown();
++            try {
++                if (!executorService.awaitTermination(5, TimeUnit.SECONDS)) {
++                    executorService.shutdownNow();
++                }
++            } catch (InterruptedException e) {
++                executorService.shutdownNow();
++                Thread.currentThread().interrupt();
++            }
++        }
++    }
+     
+     public static void doTick(Collection<ServerLevel> serverLevels){
+         List<Future<?>> futures = new ArrayList<>(serverLevels.size());

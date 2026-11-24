@@ -1,0 +1,268 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: albardoo02 <akshs@outlook.jp>
+Date: Tue, 20 Oct 2026 16:49:03 +0900
+Subject: [PATCH] Fix WorldTask deadlock, reentrant task execution, ThreadLocal
+ leak, and profiler pop
+
+
+diff --git a/net/minecraft/server/level/ServerLevel.java b/net/minecraft/server/level/ServerLevel.java
+index b31ae79e6b5f7c1165324329d0a6c038260e8516..052d05961d61c9bea3dceaf941fdc688aa2a5694 100644
+--- a/net/minecraft/server/level/ServerLevel.java
++++ b/net/minecraft/server/level/ServerLevel.java
+@@ -840,8 +840,11 @@ public class ServerLevel extends Level implements ServerEntityGetter, WorldGenLe
+                                 if (!entity.isRemoved()) {
+                                     if (!tickRateManager.isEntityFrozen(entity)) {
+                                         profilerFiller.push("checkDespawn");
+-                                        entity.checkDespawn();
+-                                        profilerFiller.pop();
++                                        try {
++                                            entity.checkDespawn();
++                                        } finally {
++                                            profilerFiller.pop();
++                                        }
+                                         if (true) { // Paper - rewrite chunk system
+                                             Entity vehicle = entity.getVehicle();
+                                             if (vehicle != null) {
+@@ -853,8 +856,11 @@ public class ServerLevel extends Level implements ServerEntityGetter, WorldGenLe
+                                             }
+ 
+                                             profilerFiller.push("tick");
+-                                            this.guardEntityTick(this::tickNonPassenger, entity);
+-                                            profilerFiller.pop();
++                                            try {
++                                                this.guardEntityTick(this::tickNonPassenger, entity);
++                                            } finally {
++                                                profilerFiller.pop();
++                                            }
+                                         }
+                                     }
+                                 }
+diff --git a/world/chiyomixin/thread/ImplConcurrentTaskHandler.java b/world/chiyomixin/thread/ImplConcurrentTaskHandler.java
+index 9d35a8a903cdc3bce2e31ade19d85569aacdde52..0d5550c10f36c717deebb4fb235088706988659a 100644
+--- a/world/chiyomixin/thread/ImplConcurrentTaskHandler.java
++++ b/world/chiyomixin/thread/ImplConcurrentTaskHandler.java
+@@ -18,8 +18,16 @@ public class ImplConcurrentTaskHandler extends ConcurrentTaskHandler {
+             return supplier.get();
+         }
+         
++        if (targetWorld == null) {
++            throw new IllegalArgumentException("targetWorld cannot be null");
++        }
++        var craftWorld = (CraftWorld) targetWorld;
++        var handle = craftWorld.getHandle();
++        if (handle == null || handle.worldThread == null) {
++            throw new IllegalStateException("World " + targetWorld.getName() + " is not initialized or unloaded");
++        }
++        WorldThread targetWorldThread = handle.worldThread;
+         WorldThread currentWorldThread = WorldThreadPool.getWorldThreadFromCurrentThread();
+-        WorldThread targetWorldThread = ((CraftWorld) targetWorld).getHandle().worldThread;
+         
+         // World thread - already on target world thread
+         if (currentWorldThread == targetWorldThread) {
+@@ -43,9 +51,14 @@ public class ImplConcurrentTaskHandler extends ConcurrentTaskHandler {
+             
+             try {
+                 return worldTask.get();
+-            } catch (InterruptedException | ExecutionException e) {
++            } catch (InterruptedException e) {
++                Thread.currentThread().interrupt();
++                e.printStackTrace();
++                throw new IllegalStateException("Failed to wait for world task.", e);
++            } catch (ExecutionException e) {
+                 e.printStackTrace();
+-                throw new IllegalStateException("Failed to wait for world task.");
++                Throwable cause = e.getCause() != null ? e.getCause() : e;
++                throw new IllegalStateException("Failed to wait for world task: " + cause.getMessage(), cause);
+             }
+         }
+         
+diff --git a/world/chiyomixin/thread/WorldTask.java b/world/chiyomixin/thread/WorldTask.java
+index 10cc88c7a88b7dfcbb838ee72661e9a4ceb7f491..0d3536bd871e6ca4e52bd0c9011d282838ce7e4b 100644
+--- a/world/chiyomixin/thread/WorldTask.java
++++ b/world/chiyomixin/thread/WorldTask.java
+@@ -11,6 +11,12 @@ public class WorldTask<T> extends CompletableFuture<T> {
+         this.task = task;
+     }
+     
+-    public void complete(){super.complete(task.get());}
++    public void complete() {
++        try {
++            super.complete(task.get());
++        } catch (Throwable t) {
++            super.completeExceptionally(t);
++        }
++    }
+     
+ }
+diff --git a/world/chiyomixin/thread/WorldThread.java b/world/chiyomixin/thread/WorldThread.java
+index f618c07e6893f2c78e8b2e3c0849ca9f615cc76e..802407d9a62e9a76c65a887ffb4e78e649617afb 100644
+--- a/world/chiyomixin/thread/WorldThread.java
++++ b/world/chiyomixin/thread/WorldThread.java
+@@ -5,6 +5,7 @@ import net.minecraft.world.level.Level;
+ import world.chiyomixin.log.ChiyoMixinLogger;
+ 
+ import java.util.*;
++import java.util.concurrent.ConcurrentLinkedQueue;
+ import java.util.concurrent.ExecutionException;
+ import java.util.concurrent.locks.ReentrantLock;
+ 
+@@ -16,8 +17,7 @@ public class WorldThread implements Runnable {
+     
+     private Runnable worldTickRunnable;
+     
+-    private List<WorldTask<?>> worldTasks = new ArrayList<>();
+-    private List<WorldTask<?>> executingTasks = new ArrayList<>();
++    private final Queue<WorldTask<?>> worldTasks = new ConcurrentLinkedQueue<>();
+     
+     private long tick = 0;
+     
+@@ -47,7 +47,11 @@ public class WorldThread implements Runnable {
+     
+     public void setCurrentThread(Thread currentThread) {this.currentThread = currentThread;}
+     
+-    public void addWorldTask(WorldTask<?> worldTask) {worldTasks.add(worldTask);}
++    public void addWorldTask(WorldTask<?> worldTask) {
++        if (worldTask != null) {
++            worldTasks.offer(worldTask);
++        }
++    }
+     
+     @Override
+     public void run() {
+@@ -57,26 +61,30 @@ public class WorldThread implements Runnable {
+         WorldThreadPool.setCurrentWorldThread(this);
+         
+         try {
+-            LOCK.lock();
+-            isProcessingWorldTick = true;
+-        } finally {
+-            LOCK.unlock();
+-        }
+-        
+-        executeWorldTasks();
+-        
+-        try {
+-            worldTickRunnable.run();
+-        } catch (Throwable t) {
+-            world.chiyomixin.log.SafeguardLogger.logSafeguardException("WorldTickThread[" + (level.getWorld() != null ? level.getWorld().getName() : "world") + "]", t);
+-        }
+-        
+-        executeWorldTasks();
+-        try {
+-            LOCK.lock();
+-            isProcessingWorldTick = false;
++            try {
++                LOCK.lock();
++                isProcessingWorldTick = true;
++            } finally {
++                LOCK.unlock();
++            }
++            
++            executeWorldTasks();
++            
++            try {
++                worldTickRunnable.run();
++            } catch (Throwable t) {
++                world.chiyomixin.log.SafeguardLogger.logSafeguardException("WorldTickThread[" + (level.getWorld() != null ? level.getWorld().getName() : "world") + "]", t);
++            }
++            
++            executeWorldTasks();
+         } finally {
+-            LOCK.unlock();
++            try {
++                LOCK.lock();
++                isProcessingWorldTick = false;
++            } finally {
++                LOCK.unlock();
++            }
++            WorldThreadPool.clearCurrentWorldThread();
+         }
+     }
+     
+@@ -127,7 +135,7 @@ public class WorldThread implements Runnable {
+                         if (ChiyoMixinLogger.isShowLogs) {
+                             ChiyoMixinLogger.info(() -> "Wait for " + (level.getWorld() != null ? level.getWorld().getName() : "world") + " -> " + (targetWorldThread.level.getWorld() != null ? targetWorldThread.level.getWorld().getName() : "world"));
+                         }
+-                        targetWorldThread.worldTasks.add(worldTask);
++                        targetWorldThread.addWorldTask(worldTask);
+                         this.waitFor = targetWorldThread;
+                     } else {
+                         worldTask.complete();
+@@ -145,35 +153,27 @@ public class WorldThread implements Runnable {
+         
+         try {
+             return worldTask.get();
+-        } catch (InterruptedException | ExecutionException e) {
++        } catch (InterruptedException e) {
++            Thread.currentThread().interrupt();
+             e.printStackTrace();
+             throw new IllegalStateException("Failed to wait for world task.", e);
++        } catch (ExecutionException e) {
++            e.printStackTrace();
++            Throwable cause = e.getCause() != null ? e.getCause() : e;
++            throw new IllegalStateException("Failed to wait for world task: " + cause.getMessage(), cause);
+         } finally {
+             this.waitFor = null;
+         }
+     }
+ 
+     public void executeWorldTasks() {
+-        List<WorldTask<?>> tasksToRun;
+-        try {
+-            LOCK.lock();
+-            if (worldTasks.isEmpty()) return;
+-            tasksToRun = worldTasks;
+-            worldTasks = executingTasks;
+-            executingTasks = tasksToRun;
+-        } finally {
+-            LOCK.unlock();
+-        }
+-        try {
+-            for (int i = 0; i < tasksToRun.size(); i++) {
+-                try {
+-                    tasksToRun.get(i).complete();
+-                } catch (Throwable t) {
+-                    world.chiyomixin.log.SafeguardLogger.logSafeguardException("WorldTask completion", t);
+-                }
++        WorldTask<?> task;
++        while ((task = worldTasks.poll()) != null) {
++            try {
++                task.complete();
++            } catch (Throwable t) {
++                world.chiyomixin.log.SafeguardLogger.logSafeguardException("WorldTask completion", t);
+             }
+-        } finally {
+-            tasksToRun.clear();
+         }
+     }
+ }
+diff --git a/world/chiyomixin/thread/WorldThreadPool.java b/world/chiyomixin/thread/WorldThreadPool.java
+index dcc87ad3cad5e4b57715c82d6c07f56d5b02c991..f92d01626996ec083866ac7dc961714a1d68a65c 100644
+--- a/world/chiyomixin/thread/WorldThreadPool.java
++++ b/world/chiyomixin/thread/WorldThreadPool.java
+@@ -28,6 +28,11 @@ public class WorldThreadPool {
+         worldThreadHashMap.put(Thread.currentThread(), worldThread);
+     }
+ 
++    public static void clearCurrentWorldThread() {
++        CURRENT_WORLD_THREAD.remove();
++        worldThreadHashMap.remove(Thread.currentThread());
++    }
++
+     public static void addCurrentThreadToWorldThreadHashMap(WorldThread worldThread) {
+         setCurrentWorldThread(worldThread);
+     }
+@@ -76,7 +81,12 @@ public class WorldThreadPool {
+         for (int i = 0; i < futures.size(); i++) {
+             try {
+                 futures.get(i).get();
+-            } catch (Exception e){e.printStackTrace();}
++            } catch (InterruptedException e) {
++                Thread.currentThread().interrupt();
++                e.printStackTrace();
++            } catch (Exception e) {
++                e.printStackTrace();
++            }
+         }
+     }
+     

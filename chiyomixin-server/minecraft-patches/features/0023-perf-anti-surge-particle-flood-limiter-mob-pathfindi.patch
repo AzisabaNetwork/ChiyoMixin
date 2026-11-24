@@ -1,0 +1,93 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: albardoo02 <akshs@outlook.jp>
+Date: Tue, 20 Oct 2026 18:19:35 +0900
+Subject: [PATCH] perf(anti-surge): particle flood limiter, mob pathfinding
+ throttling, and TNT raycast fast-path
+
+
+diff --git a/net/minecraft/server/level/ServerLevel.java b/net/minecraft/server/level/ServerLevel.java
+index 052d05961d61c9bea3dceaf941fdc688aa2a5694..823d8c9eafb509075b07c6404a2e5223e59a2e7e 100644
+--- a/net/minecraft/server/level/ServerLevel.java
++++ b/net/minecraft/server/level/ServerLevel.java
+@@ -2149,7 +2149,11 @@ public class ServerLevel extends Level implements ServerEntityGetter, WorldGenLe
+             return false;
+         } else {
+             BlockPos blockPos = player.blockPosition();
+-            if (blockPos.closerToCenterThan(new Vec3(x, y, z), overrideLimiter ? 512.0 : 32.0)) {
++            double maxDist = overrideLimiter ? 64.0 : 32.0; // ChiyoMixin - clamp extreme 512m particle broadcast to 64m to protect lobbies
++            if (blockPos.closerToCenterThan(new Vec3(x, y, z), maxDist)) {
++                if (player.particlePacketCountThisTick++ > 300) {
++                    return false; // ChiyoMixin - anti-surge protection: prevent network buffer overflow / watchdog crash
++                }
+                 player.connection.send(packet);
+                 return true;
+             } else {
+diff --git a/net/minecraft/server/level/ServerPlayer.java b/net/minecraft/server/level/ServerPlayer.java
+index 79c804245c7f41a5a7f062e1c5e01760adde7d84..c4b2e4b23164a9c1eddf245eae6bfc52649e2699 100644
+--- a/net/minecraft/server/level/ServerPlayer.java
++++ b/net/minecraft/server/level/ServerPlayer.java
+@@ -262,6 +262,7 @@ public class ServerPlayer extends Player implements ca.spottedleaf.moonrise.patc
+     private ServerPlayer.@Nullable RespawnConfig respawnConfig;
+     private final TextFilter textFilter;
+     private boolean textFilteringEnabled;
++    public int particlePacketCountThisTick = 0; // ChiyoMixin - anti-surge particle limiter
+     private boolean allowsListing;
+     private boolean spawnExtraParticlesOnFall = false;
+     public WardenSpawnTracker wardenSpawnTracker = new WardenSpawnTracker();
+@@ -795,6 +796,7 @@ public class ServerPlayer extends Player implements ca.spottedleaf.moonrise.patc
+     }
+ 
+     public void doTick() {
++        this.particlePacketCountThisTick = 0; // ChiyoMixin - reset particle count per tick
+         try {
+             if (valid && !this.isSpectator() || !this.touchingUnloadedChunk()) { // Paper - don't tick dead players that are not in the world currently (pending respawn)
+                 super.tick();
+diff --git a/net/minecraft/world/entity/ai/navigation/PathNavigation.java b/net/minecraft/world/entity/ai/navigation/PathNavigation.java
+index 61c7ca1d262098583d40b78e22db8fa67cf1dec2..cc70b7473855ddfeafa6978b40440eb064be8632 100644
+--- a/net/minecraft/world/entity/ai/navigation/PathNavigation.java
++++ b/net/minecraft/world/entity/ai/navigation/PathNavigation.java
+@@ -55,6 +55,7 @@ public abstract class PathNavigation {
+     public final PathFinder pathFinder;
+     private boolean isStuck;
+     private float requiredPathLength = 16.0F;
++    protected int lastPathfindSuccessTick = 0; // ChiyoMixin - pathfinding throttle
+ 
+     public PathNavigation(Mob mob, Level level) {
+         this.mob = mob;
+@@ -212,6 +213,14 @@ public abstract class PathNavigation {
+     }
+ 
+     public boolean moveTo(Entity entity, double speedModifier) {
++        // ChiyoMixin start - pathfinding throttling: avoid recomputing A* every tick if target has barely moved and current path is still valid
++        if (this.path != null && !this.path.isDone() && this.targetPos != null) {
++            if (this.targetPos.closerToCenterThan(entity.position(), 2.0) && (net.minecraft.server.MinecraftServer.currentTick - this.lastPathfindSuccessTick < 6)) {
++                this.setSpeedModifier(speedModifier);
++                return true;
++            }
++        }
++        // ChiyoMixin end
+         // Paper start - Perf: Optimise pathfinding
+         if (this.pathfindFailures > 10 && this.path == null && net.minecraft.server.MinecraftServer.currentTick < this.lastFailure + 40) {
+             return false;
+@@ -222,6 +231,7 @@ public abstract class PathNavigation {
+         if (path != null && this.moveTo(path, speedModifier)) {
+             this.lastFailure = 0;
+             this.pathfindFailures = 0;
++            this.lastPathfindSuccessTick = net.minecraft.server.MinecraftServer.currentTick; // ChiyoMixin
+             return true;
+         } else {
+             this.pathfindFailures++;
+diff --git a/net/minecraft/world/level/ServerExplosion.java b/net/minecraft/world/level/ServerExplosion.java
+index 1e94326047622d8975fd1cc5f44e75104fd56946..849c54e8cbb62ae5108f81d10abeef5512875a4f 100644
+--- a/net/minecraft/world/level/ServerExplosion.java
++++ b/net/minecraft/world/level/ServerExplosion.java
+@@ -743,6 +743,9 @@ public class ServerExplosion implements Explosion {
+ 
+     // Paper start - Optimize explosions
+     private float getBlockDensity(Vec3 vec3d, Entity entity) {
++        if (entity instanceof net.minecraft.world.entity.item.PrimedTnt) {
++            return 1.0F; // ChiyoMixin - fast-path PrimedTnt: skip 16-point raycasting for other primed TNT entities
++        }
+         if (!this.level.paperConfig().environment.optimizeExplosions) {
+             return this.getSeenFraction(vec3d, entity, this.directMappedBlockCache, this.mutablePos); // Paper - collision optimisations
+         }

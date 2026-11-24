@@ -1,0 +1,111 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: albardoo02 <akshs@outlook.jp>
+Date: Tue, 20 Oct 2026 15:31:12 +0900
+Subject: [PATCH] Optimize WorldThread task execution with double buffering and
+ support BiPredicate move check
+
+
+diff --git a/world/chiyomixin/bridge/ParallelEntityMoveHandler.java b/world/chiyomixin/bridge/ParallelEntityMoveHandler.java
+index 2092a7d16ba0c20af5eea2ad96203070b77c3bf2..4588a2280fe5ae47727fcc8e2cf3ade0b5122328 100644
+--- a/world/chiyomixin/bridge/ParallelEntityMoveHandler.java
++++ b/world/chiyomixin/bridge/ParallelEntityMoveHandler.java
+@@ -6,6 +6,7 @@ import org.bukkit.util.Vector;
+ 
+ import java.util.AbstractMap;
+ import java.util.Map;
++import java.util.function.BiPredicate;
+ import java.util.function.Function;
+ 
+ public class ParallelEntityMoveHandler {
+@@ -13,12 +14,18 @@ public class ParallelEntityMoveHandler {
+     private final Player player;
+     
+     public Function<Map.Entry<BoundingBox, Vector>, Boolean> tryToMoveFunction = null;
++    public BiPredicate<BoundingBox, Vector> tryToMovePredicate = null;
+     
+     public ParallelEntityMoveHandler(Player player){this.player = player;}
+     
+     public boolean tryToMoveBoundingBox(BoundingBox boundingBox, Vector movement) {
+-        return tryToMoveFunction.apply(new AbstractMap.SimpleEntry<>(boundingBox, movement));
++        if (tryToMovePredicate != null) {
++            return tryToMovePredicate.test(boundingBox, movement);
++        }
++        if (tryToMoveFunction != null) {
++            return tryToMoveFunction.apply(new AbstractMap.SimpleEntry<>(boundingBox, movement));
++        }
++        return false;
+     }
+     
+ }
+-
+diff --git a/world/chiyomixin/log/ChiyoMixinLogger.java b/world/chiyomixin/log/ChiyoMixinLogger.java
+index 4e8c887d08cb3e68d2d0ae269d570bce74c26469..a68b2f6d397edf587bb1fcf11e7256ba3dca56e7 100644
+--- a/world/chiyomixin/log/ChiyoMixinLogger.java
++++ b/world/chiyomixin/log/ChiyoMixinLogger.java
+@@ -1,7 +1,7 @@
+ package world.chiyomixin.log;
+ 
+-
+ import net.minecraft.server.MinecraftServer;
++import java.util.function.Supplier;
+ 
+ public class ChiyoMixinLogger {
+     
+@@ -13,5 +13,9 @@ public class ChiyoMixinLogger {
+         MinecraftServer.LOGGER.info(string);
+     }
+     
++    public static void info(Supplier<String> supplier){
++        if(!isShowLogs || supplier == null) return;
++        MinecraftServer.LOGGER.info("ChiyoMixin : INFO > " + supplier.get());
++    }
++    
+ }
+-
+diff --git a/world/chiyomixin/thread/WorldThread.java b/world/chiyomixin/thread/WorldThread.java
+index 626bb12a183ec18133f0d52bbcbe9bde84fd0188..c37e74705d865bb3b3e6640b82e1deeef33d26b1 100644
+--- a/world/chiyomixin/thread/WorldThread.java
++++ b/world/chiyomixin/thread/WorldThread.java
+@@ -17,7 +17,8 @@ public class WorldThread implements Runnable {
+     
+     private Runnable worldTickRunnable;
+     
+-    private final List<WorldTask<?>> worldTasks = new ArrayList<>();
++    private List<WorldTask<?>> worldTasks = new ArrayList<>();
++    private List<WorldTask<?>> executingTasks = new ArrayList<>();
+     
+     private long tick = 0;
+     
+@@ -154,23 +155,26 @@ public class WorldThread implements Runnable {
+     }
+ 
+     public void executeWorldTasks() {
+-        List<WorldTask<?>> tasksToRun = null;
++        List<WorldTask<?>> tasksToRun;
+         try {
+             LOCK.lock();
+             if (worldTasks.isEmpty()) return;
+-            tasksToRun = new ArrayList<>(worldTasks);
+-            worldTasks.clear();
++            tasksToRun = worldTasks;
++            worldTasks = executingTasks;
++            executingTasks = tasksToRun;
+         } finally {
+             LOCK.unlock();
+         }
+-        if (tasksToRun != null) {
+-            for (WorldTask<?> task : tasksToRun) {
++        try {
++            for (int i = 0; i < tasksToRun.size(); i++) {
+                 try {
+-                    task.complete();
++                    tasksToRun.get(i).complete();
+                 } catch (Throwable t) {
+                     world.chiyomixin.log.SafeguardLogger.logSafeguardException("WorldTask completion", t);
+                 }
+             }
++        } finally {
++            tasksToRun.clear();
+         }
+     }
+ }

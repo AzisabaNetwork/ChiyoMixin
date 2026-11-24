@@ -1,0 +1,68 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: albardoo02 <akshs@outlook.jp>
+Date: Tue, 20 Oct 2026 17:01:27 +0900
+Subject: [PATCH] Fix async TickThread context violation, set level.thread in
+ run, reset safeLockCount on exit, and shutdown pool in stopServer
+
+
+diff --git a/net/minecraft/server/MinecraftServer.java b/net/minecraft/server/MinecraftServer.java
+index f423028c05a83eb62e2a7e469166f23d277f7193..80dd85ecb671a77154fe47f50898638f8fba293e 100644
+--- a/net/minecraft/server/MinecraftServer.java
++++ b/net/minecraft/server/MinecraftServer.java
+@@ -1072,6 +1072,7 @@ public abstract class MinecraftServer extends ReentrantBlockableEventLoop<TickTa
+         try {
+             io.papermc.paper.util.MCUtil.ASYNC_EXECUTOR.awaitTermination(30, java.util.concurrent.TimeUnit.SECONDS); // Paper
+         } catch (java.lang.InterruptedException ignored) {} // Paper
++        world.chiyomixin.thread.WorldThreadPool.shutdown(); // ChiyoMixin - world thread pool shutdown
+         if (org.spigotmc.SpigotConfig.saveUserCacheOnStopOnly) {
+             LOGGER.info("Saving usercache.json");
+             this.services().nameToIdCache().save(false); // Paper - Perf: Async GameProfileCache saving
+diff --git a/world/chiyomixin/thread/ImplConcurrentTaskHandler.java b/world/chiyomixin/thread/ImplConcurrentTaskHandler.java
+index 0d5550c10f36c717deebb4fb235088706988659a..5c268c45eb2b07af27b606c56eb971316c221cca 100644
+--- a/world/chiyomixin/thread/ImplConcurrentTaskHandler.java
++++ b/world/chiyomixin/thread/ImplConcurrentTaskHandler.java
+@@ -34,20 +34,10 @@ public class ImplConcurrentTaskHandler extends ConcurrentTaskHandler {
+             return supplier.get();
+         }
+         
+-        // Async thread
++        // Async thread - always dispatch to world thread to ensure TickThread context (prevents Moonrise chunk/block-entity errors)
+         if (currentWorldThread == null) {
+-            WorldTask<T> worldTask = null;
+-            try {
+-                targetWorldThread.LOCK.lock();
+-                if (targetWorldThread.isProcessingWorldTick()) {
+-                    worldTask = new WorldTask<>(supplier);
+-                    targetWorldThread.addWorldTask(worldTask);
+-                } else {
+-                    return supplier.get();
+-                }
+-            } finally {
+-                targetWorldThread.LOCK.unlock();
+-            }
++            WorldTask<T> worldTask = new WorldTask<>(supplier);
++            targetWorldThread.addWorldTask(worldTask);
+             
+             try {
+                 return worldTask.get();
+diff --git a/world/chiyomixin/thread/WorldThread.java b/world/chiyomixin/thread/WorldThread.java
+index ea73c59b04c59cb34fb48fa8d7825aee787380f1..643097a4c7140d1493fec08e928c2aae08a9ab7b 100644
+--- a/world/chiyomixin/thread/WorldThread.java
++++ b/world/chiyomixin/thread/WorldThread.java
+@@ -58,6 +58,7 @@ public class WorldThread implements Runnable {
+         tick++;
+         
+         currentThread = Thread.currentThread();
++        level.thread = currentThread;
+         WorldThreadPool.setCurrentWorldThread(this);
+         
+         try {
+@@ -84,6 +85,8 @@ public class WorldThread implements Runnable {
+             } finally {
+                 LOCK.unlock();
+             }
++            this.safeLockCount = 0;
++            level.thread = null;
+             WorldThreadPool.clearCurrentWorldThread();
+         }
+     }
