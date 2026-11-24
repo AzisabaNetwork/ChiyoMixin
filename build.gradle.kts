@@ -86,45 +86,48 @@ subprojects {
 // and patches it on first start), with PaperMixin added on top. PaperMixin is started through the
 // "Launcher-Agent-Class" manifest attribute, so `java -jar ChiyoMixin-paperclip.jar` is enough;
 // no -javaagent flag is needed. Mixin modules go into <server root>/modules.
-val paperMixinBuild = gradle.includedBuild("papermixin")
+// The included build is absent inside paperweight's nested build (see settings.gradle.kts), so register the task only when it is there.
+if (gradle.parent == null) {
+    val paperMixinBuild = gradle.includedBuild("papermixin")
 
-val createChiyoMixinJar by tasks.registering(Jar::class) {
-    group = "chiyomixin"
-    description = "Creates the ChiyoMixin paperclip jar (mojmap) with PaperMixin bundled"
+    val createChiyoMixinJar by tasks.registering(Jar::class) {
+        group = "chiyomixin"
+        description = "Creates the ChiyoMixin paperclip jar (mojmap) with PaperMixin bundled"
 
-    val mcVersion = providers.gradleProperty("mcVersion").get()
-    val projectVersion = project.version.toString()
-    dependsOn(":chiyomixin-server:createMojmapPaperclipJar")
-    dependsOn(paperMixinBuild.task(":shadowJar"))
+        val mcVersion = providers.gradleProperty("mcVersion").get()
+        val projectVersion = project.version.toString()
+        dependsOn(":chiyomixin-server:createMojmapPaperclipJar")
+        dependsOn(paperMixinBuild.task(":shadowJar"))
 
-    val paperclipJar = layout.projectDirectory.file("chiyomixin-server/build/libs/chiyomixin-paperclip-$projectVersion-mojmap.jar")
-    val paperMixinJar = layout.projectDirectory.file("chiyomixin-mixin/build/libs/PaperMixin-1.0.0-SNAPSHOT-all.jar")
+        val paperclipJar = layout.projectDirectory.file("chiyomixin-server/build/libs/chiyomixin-paperclip-$projectVersion-mojmap.jar")
+        val paperMixinJar = layout.projectDirectory.file("chiyomixin-mixin/build/libs/PaperMixin-1.0.0-SNAPSHOT-all.jar")
 
-    from(zipTree(paperclipJar)) {
-        exclude("META-INF/MANIFEST.MF")
-    }
-    from(zipTree(paperMixinJar)) {
-        // plugin.yml is only used when PaperMixin is installed as a plugin
-        exclude("META-INF/MANIFEST.MF", "plugin.yml")
-    }
-    duplicatesStrategy = DuplicatesStrategy.EXCLUDE
+        from(zipTree(paperclipJar)) {
+            exclude("META-INF/MANIFEST.MF")
+        }
+        from(zipTree(paperMixinJar)) {
+            // plugin.yml is only used when PaperMixin is installed as a plugin
+            exclude("META-INF/MANIFEST.MF", "plugin.yml")
+        }
+        duplicatesStrategy = DuplicatesStrategy.EXCLUDE
 
-    archiveFileName = "ChiyoMixin-paperclip-$projectVersion.jar"
-    destinationDirectory = layout.buildDirectory.dir("libs")
+        archiveFileName = "ChiyoMixin-paperclip-$projectVersion.jar"
+        destinationDirectory = layout.buildDirectory.dir("libs")
 
-    manifest {
-        attributes(
-            "Main-Class" to "io.papermc.paperclip.Main",
-            "Launcher-Agent-Class" to "net.azisaba.papermixin.PaperMixinAgent",
-            "Premain-Class" to "net.azisaba.papermixin.PaperMixinAgent",
-            "Can-Redefine-Classes" to "true",
-            "Can-Retransform-Classes" to "true",
-            "Enable-Native-Access" to "ALL-UNNAMED",
-            "Implementation-Title" to "ChiyoMixin",
-            "Implementation-Version" to projectVersion,
-            "Implementation-Vendor" to "AzisabaNetwork",
-            "Minecraft-Version" to mcVersion,
-        )
+        manifest {
+            attributes(
+                "Main-Class" to "io.papermc.paperclip.Main",
+                "Launcher-Agent-Class" to "net.azisaba.papermixin.PaperMixinAgent",
+                "Premain-Class" to "net.azisaba.papermixin.PaperMixinAgent",
+                "Can-Redefine-Classes" to "true",
+                "Can-Retransform-Classes" to "true",
+                "Enable-Native-Access" to "ALL-UNNAMED",
+                "Implementation-Title" to "ChiyoMixin",
+                "Implementation-Version" to projectVersion,
+                "Implementation-Vendor" to "AzisabaNetwork",
+                "Minecraft-Version" to mcVersion,
+            )
+        }
     }
 }
 // ChiyoMixin end
