@@ -15,3 +15,6 @@ build
 
 .idea/
 *.iml
+
+# IDE AI tool settings (may contain tokens)
+.ai/
