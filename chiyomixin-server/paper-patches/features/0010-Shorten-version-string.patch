@@ -1,0 +1,53 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: albardoo02 <akshs@outlook.jp>
+Date: Wed, 25 Nov 2026 22:11:26 +0900
+Subject: [PATCH] Shorten version string
+
+
+diff --git a/src/main/java/io/papermc/paper/PaperBootstrap.java b/src/main/java/io/papermc/paper/PaperBootstrap.java
+index d543b1b107ab8d3eeb1fc3c1cadf489928d2786e..29be452fdfdad70520b08aad5c768ea4321ea1a0 100644
+--- a/src/main/java/io/papermc/paper/PaperBootstrap.java
++++ b/src/main/java/io/papermc/paper/PaperBootstrap.java
+@@ -45,10 +45,9 @@ public final class PaperBootstrap {
+                 osArch
+             ),
+             String.format(
+-                "Loading %s %s for Minecraft %s",
++                "Loading %s %s", // ChiyoMixin - Minecraft version is already part of the version string
+                 bi.brandName(),
+-                bi.asString(ServerBuildInfo.StringRepresentation.VERSION_FULL),
+-                bi.minecraftVersionId()
++                bi.asString(ServerBuildInfo.StringRepresentation.VERSION_FULL)
+             )
+         );
+     }
+diff --git a/src/main/java/io/papermc/paper/ServerBuildInfoImpl.java b/src/main/java/io/papermc/paper/ServerBuildInfoImpl.java
+index 74ffdc823e66fc5ec027c4b7c462382bcbfe2be2..578fc723218575cee0917168418e59edb9c48325 100644
+--- a/src/main/java/io/papermc/paper/ServerBuildInfoImpl.java
++++ b/src/main/java/io/papermc/paper/ServerBuildInfoImpl.java
+@@ -74,20 +74,18 @@ public record ServerBuildInfoImpl(
+         } else {
+             sb.append(BUILD_DEV);
+         }
+-        final boolean hasGitBranch = this.gitBranch.isPresent();
++        final boolean hasGitBranch = this.gitBranch.isPresent() && !this.gitBranch.get().equals("ver/" + this.minecraftVersionId); // ChiyoMixin - omit default version branch
+         final boolean hasGitCommit = this.gitCommit.isPresent();
+-        if (hasGitBranch || hasGitCommit) {
+-            sb.append('-');
+-        }
++        // ChiyoMixin start - "<build>-<branch>@<commit>" or "<build>@<commit>"
+         if (hasGitBranch && representation == StringRepresentation.VERSION_FULL) {
++            sb.append('-');
+             sb.append(this.gitBranch.get());
+-            if (hasGitCommit) {
+-                sb.append('@');
+-            }
+         }
+         if (hasGitCommit) {
++            sb.append('@');
+             sb.append(this.gitCommit.get());
+         }
++        // ChiyoMixin end
+         if (representation == StringRepresentation.VERSION_FULL) {
+             sb.append(' ');
+             sb.append('(');

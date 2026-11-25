@@ -2,6 +2,7 @@ import io.papermc.fill.model.BuildChannel
 import io.papermc.paperweight.attribute.DevBundleOutput
 import io.papermc.paperweight.util.*
 import java.time.Instant
+import java.time.OffsetDateTime // ChiyoMixin
 
 plugins {
     `java-library`
@@ -219,8 +220,11 @@ tasks.jar {
     manifest {
         val git = Git(rootProject.layout.projectDirectory.path)
         val mcVersion = rootProject.providers.gradleProperty("mcVersion").get()
-        val build = System.getenv("BUILD_NUMBER") ?: null
-        val buildTime = providers.environmentVariable("BUILD_STARTED_AT").map(Instant::parse).orElse(Instant.EPOCH).get()
+        // ChiyoMixin start - use git commit count as build number, commit time as build time
+        val build = System.getenv("BUILD_NUMBER") ?: git.exec(providers, "rev-list", "--count", "HEAD").get().trim()
+        val buildTime = providers.environmentVariable("BUILD_STARTED_AT").map(Instant::parse)
+            .orElse(git.exec(providers, "show", "-s", "--format=%cI", "HEAD").map { OffsetDateTime.parse(it.trim()).toInstant() }).get()
+        // ChiyoMixin end
         val gitHash = git.exec(providers, "rev-parse", "--short=7", "HEAD").get().trim()
         val implementationVersion = "$mcVersion-${build ?: "DEV"}-$gitHash"
         val date = git.exec(providers, "show", "-s", "--format=%ci", gitHash).get().trim()

@@ -1,0 +1,86 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: albardoo02 <akshs@outlook.jp>
+Date: Wed, 25 Nov 2026 22:07:21 +0900
+Subject: [PATCH] Check updates against ChiyoMixin repository
+
+
+diff --git a/src/main/java/com/destroystokyo/paper/PaperVersionFetcher.java b/src/main/java/com/destroystokyo/paper/PaperVersionFetcher.java
+index 602d3ce2cd16405f35453ce12a207b70312a4a8a..d610f5fe4de4e7b16b2909de0694d48944a0fef1 100644
+--- a/src/main/java/com/destroystokyo/paper/PaperVersionFetcher.java
++++ b/src/main/java/com/destroystokyo/paper/PaperVersionFetcher.java
+@@ -40,10 +40,10 @@ public class PaperVersionFetcher implements VersionFetcher {
+     private static final ComponentLogger COMPONENT_LOGGER = ComponentLogger.logger(LogManager.getRootLogger().getName());
+     private static final int DISTANCE_ERROR = -1;
+     private static final int DISTANCE_UNKNOWN = -2;
+-    private static final String DOWNLOAD_PAGE = "https://papermc.io/downloads/paper";
+-    private static final String REPOSITORY = "PaperMC/Paper";
++    private static final String DOWNLOAD_PAGE = "https://github.com/AzisabaNetwork/ChiyoMixin/actions"; // ChiyoMixin
++    private static final String REPOSITORY = "AzisabaNetwork/ChiyoMixin"; // ChiyoMixin
+     private static final ServerBuildInfo BUILD_INFO = ServerBuildInfo.buildInfo();
+-    private static final String USER_AGENT = BUILD_INFO.brandName() + "/" + BUILD_INFO.asString(VERSION_SIMPLE) + " (https://papermc.io)";
++    private static final String USER_AGENT = BUILD_INFO.brandName() + "/" + BUILD_INFO.asString(VERSION_SIMPLE) + " (https://github.com/AzisabaNetwork/ChiyoMixin)"; // ChiyoMixin
+     private static final Gson GSON = new Gson();
+ 
+     @Override
+@@ -71,16 +71,14 @@ public class PaperVersionFetcher implements VersionFetcher {
+         if (buildNumber.isEmpty() && BUILD_INFO.gitCommit().isEmpty()) {
+             COMPONENT_LOGGER.warn(text("*** You are running a development version without access to version information ***"));
+         } else {
+-            final Optional<MinecraftVersionFetcher> apiResult = fetchMinecraftVersionList();
+-            if (buildNumber.isPresent()) {
+-                distance = fetchDistanceFromSiteApi(buildNumber.getAsInt());
+-            } else {
+-                final Optional<String> gitBranch = BUILD_INFO.gitBranch();
+-                final Optional<String> gitCommit = BUILD_INFO.gitCommit();
+-                if (gitBranch.isPresent() && gitCommit.isPresent()) {
+-                    distance = fetchDistanceFromGitHub(gitBranch.get(), gitCommit.get());
+-                }
++            // ChiyoMixin start - check against our own GitHub repository instead of Paper's build API
++            final Optional<MinecraftVersionFetcher> apiResult = Optional.empty();
++            final Optional<String> gitBranch = BUILD_INFO.gitBranch();
++            final Optional<String> gitCommit = BUILD_INFO.gitCommit();
++            if (gitBranch.isPresent() && gitCommit.isPresent()) {
++                distance = fetchDistanceFromGitHub(gitBranch.get(), gitCommit.get());
+             }
++            // ChiyoMixin end
+ 
+             switch (distance) {
+                 case DISTANCE_ERROR -> COMPONENT_LOGGER.error(text("*** Error obtaining version information! Cannot fetch version info ***"));
+@@ -92,7 +90,7 @@ public class PaperVersionFetcher implements VersionFetcher {
+                     COMPONENT_LOGGER.warn(text(DOWNLOAD_PAGE));
+                     COMPONENT_LOGGER.warn(text("*************************************************************************************"));
+                 });
+-                case DISTANCE_UNKNOWN -> COMPONENT_LOGGER.warn(text("*** You are running an unknown version! Cannot fetch version info ***"));
++                case DISTANCE_UNKNOWN -> COMPONENT_LOGGER.info(text("*** You are running a local build (commit not found on " + REPOSITORY + ") ***")); // ChiyoMixin
+                 default -> {
+                     if (apiResult.isPresent()) {
+                         COMPONENT_LOGGER.warn(text("*** You are running an outdated version of Minecraft, which is " + apiResult.get().distance() + " release(s) and " + distance + " build(s) behind!"));
+@@ -109,21 +107,18 @@ public class PaperVersionFetcher implements VersionFetcher {
+     private static Component getUpdateStatusMessage() {
+         int distance = DISTANCE_ERROR;
+ 
+-        final OptionalInt buildNumber = PaperVersionFetcher.BUILD_INFO.buildNumber();
+-        if (buildNumber.isPresent()) {
+-            distance = fetchDistanceFromSiteApi(buildNumber.getAsInt());
+-        } else {
+-            final Optional<String> gitBranch = PaperVersionFetcher.BUILD_INFO.gitBranch();
+-            final Optional<String> gitCommit = PaperVersionFetcher.BUILD_INFO.gitCommit();
+-            if (gitBranch.isPresent() && gitCommit.isPresent()) {
+-                distance = fetchDistanceFromGitHub(gitBranch.get(), gitCommit.get());
+-            }
++        // ChiyoMixin start - check against our own GitHub repository instead of Paper's build API
++        final Optional<String> gitBranch = PaperVersionFetcher.BUILD_INFO.gitBranch();
++        final Optional<String> gitCommit = PaperVersionFetcher.BUILD_INFO.gitCommit();
++        if (gitBranch.isPresent() && gitCommit.isPresent()) {
++            distance = fetchDistanceFromGitHub(gitBranch.get(), gitCommit.get());
+         }
++        // ChiyoMixin end
+ 
+         return switch (distance) {
+             case DISTANCE_ERROR -> text("Error obtaining version information", NamedTextColor.YELLOW);
+             case 0 -> text("You are running the latest version", NamedTextColor.GREEN);
+-            case DISTANCE_UNKNOWN -> text("Unknown version", NamedTextColor.YELLOW);
++            case DISTANCE_UNKNOWN -> text("Local build (commit not found on GitHub)", NamedTextColor.GRAY); // ChiyoMixin
+             default -> text("You are " + distance + " version(s) behind", NamedTextColor.YELLOW)
+                 .append(Component.newline())
+                 .append(text("Download the new version at: ")

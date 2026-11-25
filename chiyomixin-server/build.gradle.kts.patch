@@ -1,5 +1,13 @@
 --- a/paper-server/build.gradle.kts
 +++ b/paper-server/build.gradle.kts
+@@ -2,6 +_,7 @@
+ import io.papermc.paperweight.attribute.DevBundleOutput
+ import io.papermc.paperweight.util.*
+ import java.time.Instant
++import java.time.OffsetDateTime // ChiyoMixin
+ 
+ plugins {
+     `java-library`
 @@ -22,6 +_,17 @@
      minecraftVersion = providers.gradleProperty("mcVersion")
      gitFilePatches = false
@@ -50,7 +58,7 @@
      implementation("ca.spottedleaf:concurrentutil:0.0.8")
      implementation("org.jline:jline-terminal-ffm:3.27.1") // use ffm on java 22+
      implementation("org.jline:jline-terminal-jni:3.27.1") // fall back to jni on java 21
-@@ -186,6 +_,10 @@
+@@ -186,26 +_,33 @@
      implementation("me.lucko:spark-paper:1.10.152")
  }
  
@@ -61,7 +69,17 @@
  tasks.jar {
      manifest {
          val git = Git(rootProject.layout.projectDirectory.path)
-@@ -198,14 +_,14 @@
+         val mcVersion = rootProject.providers.gradleProperty("mcVersion").get()
+-        val build = System.getenv("BUILD_NUMBER") ?: null
+-        val buildTime = providers.environmentVariable("BUILD_STARTED_AT").map(Instant::parse).orElse(Instant.EPOCH).get()
++        // ChiyoMixin start - use git commit count as build number, commit time as build time
++        val build = System.getenv("BUILD_NUMBER") ?: git.exec(providers, "rev-list", "--count", "HEAD").get().trim()
++        val buildTime = providers.environmentVariable("BUILD_STARTED_AT").map(Instant::parse)
++            .orElse(git.exec(providers, "show", "-s", "--format=%cI", "HEAD").map { OffsetDateTime.parse(it.trim()).toInstant() }).get()
++        // ChiyoMixin end
+         val gitHash = git.exec(providers, "rev-parse", "--short=7", "HEAD").get().trim()
+         val implementationVersion = "$mcVersion-${build ?: "DEV"}-$gitHash"
+         val date = git.exec(providers, "show", "-s", "--format=%ci", gitHash).get().trim()
          val gitBranch = git.exec(providers, "rev-parse", "--abbrev-ref", "HEAD").get().trim()
          attributes(
              "Main-Class" to "org.bukkit.craftbukkit.Main",
