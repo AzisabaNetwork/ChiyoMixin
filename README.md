@@ -27,6 +27,22 @@ When started with `java -jar`, PaperMixin is loaded automatically through the ja
 - To start without Mixin, add `-Dchiyomixin.mixin.disable=true`
 - Passing the jar explicitly as `-javaagent` as well does not load PaperMixin twice
 
+### Docker / Kubernetes
+
+CI publishes an image based on [itzg/minecraft-server](https://github.com/itzg/docker-minecraft-server)
+to `ghcr.io/azisabanetwork/chiyomixin` on every push:
+`1.21.11`, `1.21.11-<build>` and `latest` from `ver/1.21.11`; `<branch>` and `sha-<commit>` from every branch.
+
+It runs with `TYPE=CUSTOM` and the ChiyoMixin jar baked in, so every itzg setting
+(`EULA`, `MEMORY`, `JVM_OPTS`, `OPS`, ...) works as usual and the server root is `/data`.
+
+```bash
+docker run -it -p 25565:25565 -v ./server:/data -e EULA=TRUE -e MEMORY=4G ghcr.io/azisabanetwork/chiyomixin:1.21.11
+```
+
+On Kubernetes (or with itzg's Helm chart), use `ghcr.io/azisabanetwork/chiyomixin:<tag>` as the image
+in place of `itzg/minecraft-server`. Do not set `TYPE` yourself.
+
 The configuration file is `chiyomixin.yml`, and the API package is `world.chiyomixin`.
 ChiyogamiLib (`world.chiyogami.chiyogamilib`) works as is.
 
